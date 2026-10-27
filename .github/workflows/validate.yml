@@ -17,3 +17,5 @@ jobs:
         run: python3 scripts/validate.py
       - name: ShellCheck
         run: shellcheck scripts/*.sh
+      - name: Run offline unit tests
+        run: python3 -m unittest discover -s tests -v

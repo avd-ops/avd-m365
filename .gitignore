@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+m365-manifest.json
+m365-run-manifest.json
+entra-manifest.json
