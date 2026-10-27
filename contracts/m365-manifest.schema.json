@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avd-ops.dev/contracts/m365-manifest.schema.json",
+  "title": "avd-m365 handoff manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "environment",
+    "oneDriveKfmEnabled",
+    "teamsVdiOptimizationEnabled",
+    "sharedComputerActivationEnabled"
+  ],
+  "properties": {
+    "schema": {
+      "const": "avd-ops-m365-manifest/v1"
+    },
+    "environment": {
+      "type": "string",
+      "enum": [
+        "dev",
+        "test",
+        "prod"
+      ]
+    },
+    "oneDriveKfmEnabled": {
+      "type": "boolean"
+    },
+    "teamsVdiOptimizationEnabled": {
+      "type": "boolean"
+    },
+    "sharedComputerActivationEnabled": {
+      "type": "boolean"
+    }
+  }
+}

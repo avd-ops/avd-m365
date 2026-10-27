@@ -1,0 +1,21 @@
+{
+  "name": "[avd-ops] Greenfield M365 VDI Productivity Baseline",
+  "oneDrive": {
+    "silentAccountConfig": true,
+    "knownFolderMove": [
+      "Desktop",
+      "Documents",
+      "Pictures"
+    ],
+    "filesOnDemand": true
+  },
+  "teamsVdi": {
+    "vdiMediaOptimization": "SlimCoreAndWebRtc",
+    "disableGpuHardwareAccelerationInSession": false
+  },
+  "m365Apps": {
+    "sharedComputerLicensing": true,
+    "updateChannel": "MonthlyEnterprise",
+    "outlookCachedExchangeSyncMonths": 3
+  }
+}
