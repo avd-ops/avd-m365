@@ -2,11 +2,87 @@
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [Parameter()][string]$RunManifestPath = './m365-run-manifest.json',
+    [Parameter()][ValidateSet('commercial', 'usgov')][string]$Cloud = 'commercial',
     [Parameter()][switch]$DiscardLastCopy,
     [Parameter()][switch]$DryRun
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Resolve-AvdCloudEnvironment {
+    [CmdletBinding()]
+    [OutputType([System.Collections.Hashtable], [System.Collections.Specialized.OrderedDictionary])]
+    param(
+        [Parameter()][ValidateSet('commercial', 'usgov')][string]$Cloud = 'commercial',
+        [Parameter()][string]$ContractPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'contracts/cloud-environments.json')
+    )
+    if (-not (Test-Path -LiteralPath $ContractPath)) {
+        throw "Cloud environments contract (C26) not found at '$ContractPath'."
+    }
+    $contract = Get-Content -LiteralPath $ContractPath -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
+    if (-not $contract.ContainsKey('clouds') -or -not $contract['clouds'].ContainsKey($Cloud)) {
+        throw "Cloud '$Cloud' not defined in '$ContractPath'."
+    }
+    return $contract['clouds'][$Cloud]
+}
+
+function Test-AvdM365CloudBoundary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('commercial', 'usgov')][string]$TargetCloud,
+        [Parameter(Mandatory)][hashtable]$CloudConfig,
+        [Parameter()][hashtable]$RunManifest
+    )
+
+    if ($null -ne $RunManifest -and $RunManifest.ContainsKey('cloud') -and -not [string]::IsNullOrWhiteSpace([string]$RunManifest['cloud'])) {
+        $manifestCloud = [string]$RunManifest['cloud']
+        if ($manifestCloud -ne $TargetCloud) {
+            throw "Cloud boundary mismatch: m365-run-manifest.json specifies cloud '$manifestCloud', but target cloud is '$TargetCloud'. Refusing cross-cloud operation."
+        }
+    }
+
+    $expectedAzEnv = [string]$CloudConfig['psEnvironmentName']
+    $expectedEntraEnv = [string]$CloudConfig['entraEnvironment']
+
+    $mockPath = $env:AVD_OPS_MOCK_GRAPH_PATH
+    if (-not [string]::IsNullOrWhiteSpace($mockPath) -and (Test-Path -LiteralPath $mockPath)) {
+        $mockState = Get-Content -LiteralPath $mockPath -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
+        if ($mockState.ContainsKey('azEnvironment') -and -not [string]::IsNullOrWhiteSpace([string]$mockState['azEnvironment'])) {
+            $mockAzEnv = [string]$mockState['azEnvironment']
+            if ($mockAzEnv -ne $expectedAzEnv) {
+                throw "Cloud boundary mismatch: active Az environment '$mockAzEnv' does not match target cloud '$TargetCloud' ('$expectedAzEnv')."
+            }
+        }
+        if ($mockState.ContainsKey('mgEnvironment') -and -not [string]::IsNullOrWhiteSpace([string]$mockState['mgEnvironment'])) {
+            $mockMgEnv = [string]$mockState['mgEnvironment']
+            if ($mockMgEnv -ne $expectedEntraEnv) {
+                throw "Cloud boundary mismatch: active MgGraph environment '$mockMgEnv' does not match target cloud '$TargetCloud' ('$expectedEntraEnv')."
+            }
+        }
+    }
+
+    $azCtxCmd = Get-Command 'Get-AzContext' -ErrorAction SilentlyContinue
+    if ($null -ne $azCtxCmd) {
+        $azCtx = & $azCtxCmd -ErrorAction SilentlyContinue
+        if ($null -ne $azCtx -and $null -ne $azCtx.Environment -and -not [string]::IsNullOrWhiteSpace([string]$azCtx.Environment.Name)) {
+            $activeAzEnv = [string]$azCtx.Environment.Name
+            if ($activeAzEnv -ne $expectedAzEnv) {
+                throw "Cloud boundary mismatch: active Az context environment '$activeAzEnv' does not match target cloud '$TargetCloud' ('$expectedAzEnv')."
+            }
+        }
+    }
+
+    $mgCtxCmd = Get-Command 'Get-MgContext' -ErrorAction SilentlyContinue
+    if ($null -ne $mgCtxCmd) {
+        $mgCtx = & $mgCtxCmd -ErrorAction SilentlyContinue
+        if ($null -ne $mgCtx -and -not [string]::IsNullOrWhiteSpace([string]$mgCtx.Environment)) {
+            $activeMgEnv = [string]$mgCtx.Environment
+            if ($activeMgEnv -ne $expectedEntraEnv) {
+                throw "Cloud boundary mismatch: active MgGraph environment '$activeMgEnv' does not match target cloud '$TargetCloud' ('$expectedEntraEnv'). Use Connect-MgGraph -Environment $expectedEntraEnv."
+            }
+        }
+    }
+}
 
 function Invoke-GraphDelete {
     [CmdletBinding()]
@@ -64,6 +140,24 @@ if (-not (Test-Path -LiteralPath $RunManifestPath)) {
 $isDryRun = $DryRun.IsPresent -or ($env:AVD_OPS_DRY_RUN -eq '1')
 $runManifest = Get-Content -LiteralPath $RunManifestPath -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
 
+$resolvedCloud = if ($PSBoundParameters.ContainsKey('Cloud')) {
+    $Cloud
+}
+elseif ($runManifest.ContainsKey('cloud') -and -not [string]::IsNullOrWhiteSpace([string]$runManifest['cloud'])) {
+    [string]$runManifest['cloud']
+}
+else {
+    $Cloud
+}
+
+if ($resolvedCloud -notin @('commercial', 'usgov')) {
+    throw "Invalid cloud profile '$resolvedCloud' in '$RunManifestPath'. Expected 'commercial' or 'usgov'."
+}
+
+$cloudConfig = Resolve-AvdCloudEnvironment -Cloud $resolvedCloud
+Test-AvdM365CloudBoundary -TargetCloud $resolvedCloud -CloudConfig $cloudConfig -RunManifest $runManifest
+$graphEndpoint = ([string]$cloudConfig['graphEndpoint']).TrimEnd('/')
+
 $environment = [string]$runManifest['environment']
 $prefix = [string]$runManifest['prefix']
 $stamp = if ($runManifest.ContainsKey('stamp') -and -not [string]::IsNullOrWhiteSpace([string]$runManifest['stamp'])) {
@@ -84,7 +178,7 @@ foreach ($resource in @($runManifest['resources'])) {
         [string]$resource['uri']
     }
     else {
-        "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/$resourceId"
+        "$graphEndpoint/beta/deviceManagement/configurationPolicies/$resourceId"
     }
 
     if (-not $wasCreated) {
@@ -95,6 +189,10 @@ foreach ($resource in @($runManifest['resources'])) {
     if (-not $displayName.StartsWith($stamp, [System.StringComparison]::Ordinal)) {
         Write-Verbose "Skipping policy '$displayName' ($resourceId) because it does not match stamp '$stamp'."
         continue
+    }
+
+    if (-not $uri.StartsWith("$graphEndpoint/", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Cloud boundary mismatch on delete URI '$uri': expected prefix '$graphEndpoint/' for cloud '$resolvedCloud'."
     }
 
     if ($PSCmdlet.ShouldProcess("$displayName ($resourceId)", 'Delete M365 baseline configuration policy')) {

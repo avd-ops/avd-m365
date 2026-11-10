@@ -12,6 +12,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "contracts" / "m365-manifest.schema.json"
+CLOUD_ENV_PATH = ROOT / "contracts" / "cloud-environments.json"
 DEFAULT_BASELINE_PATH = ROOT / "baselines" / "vdi-workplace-baseline.json"
 
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -27,6 +28,42 @@ def check_text_leaks(text: str, label: str, errors: list[str]) -> None:
             errors.append(f"{label}: disallowed email address {addr}")
     if JWT_PATTERN.search(text):
         errors.append(f"{label}: potential raw JWT token detected")
+
+
+def validate_cloud_environments(data: Any, label: str, errors: list[str]) -> None:
+    """Validate C26 contracts/cloud-environments.json structure and required cloud profiles."""
+    if not isinstance(data, dict):
+        errors.append(f"{label}: C26 root must be a JSON object")
+        return
+    if data.get("schema") != "avd-cloud-environments/v1":
+        errors.append(f"{label}: C26 'schema' must equal 'avd-cloud-environments/v1'")
+    clouds = data.get("clouds")
+    if not isinstance(clouds, dict):
+        errors.append(f"{label}: C26 'clouds' must be an object")
+        return
+
+    expected_clouds = {
+        "commercial": {
+            "azCloudName": "AzureCloud",
+            "psEnvironmentName": "AzureCloud",
+            "entraEnvironment": "Global",
+            "graphEndpoint": "https://graph.microsoft.com",
+        },
+        "usgov": {
+            "azCloudName": "AzureUSGovernment",
+            "psEnvironmentName": "AzureUSGovernment",
+            "entraEnvironment": "USGov",
+            "graphEndpoint": "https://graph.microsoft.us",
+        },
+    }
+    for cloud_id, expected in expected_clouds.items():
+        profile = clouds.get(cloud_id)
+        if not isinstance(profile, dict):
+            errors.append(f"{label}: missing cloud profile '{cloud_id}'")
+            continue
+        for key, exp_val in expected.items():
+            if profile.get(key) != exp_val:
+                errors.append(f"{label}: clouds.{cloud_id}.{key} must equal {exp_val!r} (got {profile.get(key)!r})")
 
 
 def validate_baseline_data(data: Any, label: str, errors: list[str]) -> None:
@@ -56,8 +93,8 @@ def validate_baseline_data(data: Any, label: str, errors: list[str]) -> None:
     if not isinstance(teams, dict):
         errors.append(f"{label}: 'teamsVdi' must be an object")
     else:
-        if teams.get("vdiMediaOptimization") not in ("SlimCoreAndWebRtc", "WebRtc"):
-            errors.append(f"{label}: 'teamsVdi.vdiMediaOptimization' must be 'SlimCoreAndWebRtc' or 'WebRtc'")
+        if teams.get("vdiMediaOptimization") not in ("SlimCore", "SlimCoreAndWebRtc", "WebRtc"):
+            errors.append(f"{label}: 'teamsVdi.vdiMediaOptimization' must be 'SlimCore', 'SlimCoreAndWebRtc', or 'WebRtc'")
         if not isinstance(teams.get("disableGpuHardwareAccelerationInSession"), bool):
             errors.append(f"{label}: 'teamsVdi.disableGpuHardwareAccelerationInSession' must be a boolean")
 
@@ -72,6 +109,28 @@ def validate_baseline_data(data: Any, label: str, errors: list[str]) -> None:
         months = apps.get("outlookCachedExchangeSyncMonths")
         if not isinstance(months, int) or isinstance(months, bool) or not (1 <= months <= 24):
             errors.append(f"{label}: 'm365Apps.outlookCachedExchangeSyncMonths' must be an integer between 1 and 24")
+
+    cloud_profiles = data.get("cloudProfiles")
+    if cloud_profiles is not None:
+        if not isinstance(cloud_profiles, dict):
+            errors.append(f"{label}: 'cloudProfiles' must be an object")
+        else:
+            for cid, expected_suffix, expected_mode in (
+                ("commercial", ".sharepoint.com", "SlimCore"),
+                ("usgov", ".sharepoint.us", "WebRtc"),
+            ):
+                cprof = cloud_profiles.get(cid)
+                if not isinstance(cprof, dict):
+                    errors.append(f"{label}: 'cloudProfiles.{cid}' must be an object")
+                    continue
+                if cprof.get("sharePointSuffix") != expected_suffix:
+                    errors.append(
+                        f"{label}: 'cloudProfiles.{cid}.sharePointSuffix' must be {expected_suffix!r}"
+                    )
+                if cprof.get("teamsVdiDefaultMode") != expected_mode:
+                    errors.append(
+                        f"{label}: 'cloudProfiles.{cid}.teamsVdiDefaultMode' must be {expected_mode!r}"
+                    )
 
 
 def validate_m365_manifest(manifest_path: Path, schema: dict[str, Any], errors: list[str]) -> None:
@@ -122,6 +181,13 @@ def validate_m365_manifest(manifest_path: Path, schema: dict[str, Any], errors: 
             if not isinstance(val, bool):
                 errors.append(f"{label}: property '{key}' must be a boolean")
 
+    cloud = data.get("cloud")
+    sp_suffix = data.get("sharePointSuffix")
+    if cloud == "usgov" and sp_suffix is not None and sp_suffix != ".sharepoint.us":
+        errors.append(f"{label}: 'sharePointSuffix' must be '.sharepoint.us' when cloud is 'usgov' (got {sp_suffix!r})")
+    elif cloud == "commercial" and sp_suffix is not None and sp_suffix != ".sharepoint.com":
+        errors.append(f"{label}: 'sharePointSuffix' must be '.sharepoint.com' when cloud is 'commercial' (got {sp_suffix!r})")
+
 
 def run_validation(manifest_paths: list[Path] | None = None, baseline_path: Path | None = None) -> list[str]:
     """Run repository and manifest validations and return a list of error strings."""
@@ -156,6 +222,15 @@ def run_validation(manifest_paths: list[Path] | None = None, baseline_path: Path
         except Exception as exc:
             errors.append(f"contracts/m365-manifest.schema.json: invalid JSON: {exc}")
 
+    if not CLOUD_ENV_PATH.is_file():
+        errors.append("contracts/cloud-environments.json: missing C26 contract file")
+    else:
+        try:
+            c26_data = json.loads(CLOUD_ENV_PATH.read_text(encoding="utf-8"))
+            validate_cloud_environments(c26_data, "contracts/cloud-environments.json", errors)
+        except Exception as exc:
+            errors.append(f"contracts/cloud-environments.json: invalid JSON: {exc}")
+
     target_baseline = baseline_path or DEFAULT_BASELINE_PATH
     if not target_baseline.is_file():
         errors.append(f"{target_baseline}: missing baseline file")
@@ -178,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--manifest",
         action="append",
-         default=[],
+        default=[],
         help="Path to an m365-manifest.json file to validate against contracts/m365-manifest.schema.json",
     )
     parser.add_argument(

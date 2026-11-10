@@ -5,6 +5,7 @@ param(
     [Parameter()][string]$BaselinePath = './baselines/vdi-workplace-baseline.json',
     [Parameter()][string]$OutputPath = './m365-manifest.json',
     [Parameter()][string]$RunManifestPath = './m365-run-manifest.json',
+    [Parameter()][ValidateSet('commercial', 'usgov')][string]$Cloud = 'commercial',
     [Parameter()][switch]$DryRun
 )
 Set-StrictMode -Version Latest
@@ -29,6 +30,106 @@ function Get-PythonCommand {
         return $localPy
     }
     throw 'Python 3 interpreter not found on PATH.'
+}
+
+function Resolve-AvdCloudEnvironment {
+    [CmdletBinding()]
+    [OutputType([System.Collections.Hashtable], [System.Collections.Specialized.OrderedDictionary])]
+    param(
+        [Parameter()][ValidateSet('commercial', 'usgov')][string]$Cloud = 'commercial',
+        [Parameter()][string]$ContractPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'contracts/cloud-environments.json')
+    )
+    if (-not (Test-Path -LiteralPath $ContractPath)) {
+        throw "Cloud environments contract (C26) not found at '$ContractPath'."
+    }
+    $contract = Get-Content -LiteralPath $ContractPath -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
+    if (-not $contract.ContainsKey('clouds') -or -not $contract['clouds'].ContainsKey($Cloud)) {
+        throw "Cloud '$Cloud' not defined in '$ContractPath'."
+    }
+    $cloudDef = $contract['clouds'][$Cloud]
+
+    if (-not $cloudDef.ContainsKey('m365') -or $null -eq $cloudDef['m365']) {
+        $cloudDef['m365'] = @{}
+    }
+    if (-not $cloudDef['m365'].ContainsKey('sharePointSuffix') -or [string]::IsNullOrWhiteSpace([string]$cloudDef['m365']['sharePointSuffix'])) {
+        $cloudDef['m365']['sharePointSuffix'] = if ($Cloud -eq 'usgov') { '.sharepoint.us' } else { '.sharepoint.com' }
+    }
+
+    if (-not $cloudDef.ContainsKey('capabilities') -or $null -eq $cloudDef['capabilities']) {
+        $cloudDef['capabilities'] = @{}
+    }
+    if (-not $cloudDef['capabilities'].ContainsKey('teamsVdiDefaultMode') -or [string]::IsNullOrWhiteSpace([string]$cloudDef['capabilities']['teamsVdiDefaultMode'])) {
+        $cloudDef['capabilities']['teamsVdiDefaultMode'] = if ($Cloud -eq 'usgov') { 'WebRtc' } else { 'SlimCore' }
+    }
+    if (-not $cloudDef['capabilities'].ContainsKey('teamsVdiOptimizationModes')) {
+        $cloudDef['capabilities']['teamsVdiOptimizationModes'] = if ($Cloud -eq 'usgov') {
+            @('WebRtc', 'SlimCoreAndWebRtc')
+        }
+        else {
+            @('SlimCore', 'SlimCoreAndWebRtc', 'WebRtc')
+        }
+    }
+
+    return $cloudDef
+}
+
+function Test-AvdM365CloudBoundary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('commercial', 'usgov')][string]$TargetCloud,
+        [Parameter(Mandatory)][hashtable]$CloudConfig,
+        [Parameter()][hashtable]$EntraManifest,
+        [Parameter()][bool]$IsDryRun = $false
+    )
+
+    if ($null -ne $EntraManifest -and $EntraManifest.ContainsKey('cloud') -and -not [string]::IsNullOrWhiteSpace([string]$EntraManifest['cloud'])) {
+        $manifestCloud = [string]$EntraManifest['cloud']
+        if ($manifestCloud -ne $TargetCloud) {
+            throw "Cloud boundary mismatch: entra-manifest.json specifies cloud '$manifestCloud', but target cloud is '$TargetCloud'. Refusing cross-cloud operation."
+        }
+    }
+
+    $expectedAzEnv = [string]$CloudConfig['psEnvironmentName']
+    $expectedEntraEnv = [string]$CloudConfig['entraEnvironment']
+
+    $mockPath = $env:AVD_OPS_MOCK_GRAPH_PATH
+    if (-not [string]::IsNullOrWhiteSpace($mockPath) -and (Test-Path -LiteralPath $mockPath)) {
+        $mockState = Get-Content -LiteralPath $mockPath -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
+        if ($mockState.ContainsKey('azEnvironment') -and -not [string]::IsNullOrWhiteSpace([string]$mockState['azEnvironment'])) {
+            $mockAzEnv = [string]$mockState['azEnvironment']
+            if ($mockAzEnv -ne $expectedAzEnv) {
+                throw "Cloud boundary mismatch: active Az environment '$mockAzEnv' does not match target cloud '$TargetCloud' ('$expectedAzEnv')."
+            }
+        }
+        if ($mockState.ContainsKey('mgEnvironment') -and -not [string]::IsNullOrWhiteSpace([string]$mockState['mgEnvironment'])) {
+            $mockMgEnv = [string]$mockState['mgEnvironment']
+            if ($mockMgEnv -ne $expectedEntraEnv) {
+                throw "Cloud boundary mismatch: active MgGraph environment '$mockMgEnv' does not match target cloud '$TargetCloud' ('$expectedEntraEnv')."
+            }
+        }
+    }
+
+    $azCtxCmd = Get-Command 'Get-AzContext' -ErrorAction SilentlyContinue
+    if ($null -ne $azCtxCmd) {
+        $azCtx = & $azCtxCmd -ErrorAction SilentlyContinue
+        if ($null -ne $azCtx -and $null -ne $azCtx.Environment -and -not [string]::IsNullOrWhiteSpace([string]$azCtx.Environment.Name)) {
+            $activeAzEnv = [string]$azCtx.Environment.Name
+            if ($activeAzEnv -ne $expectedAzEnv) {
+                throw "Cloud boundary mismatch: active Az context environment '$activeAzEnv' does not match target cloud '$TargetCloud' ('$expectedAzEnv')."
+            }
+        }
+    }
+
+    $mgCtxCmd = Get-Command 'Get-MgContext' -ErrorAction SilentlyContinue
+    if ($null -ne $mgCtxCmd) {
+        $mgCtx = & $mgCtxCmd -ErrorAction SilentlyContinue
+        if ($null -ne $mgCtx -and -not [string]::IsNullOrWhiteSpace([string]$mgCtx.Environment)) {
+            $activeMgEnv = [string]$mgCtx.Environment
+            if ($activeMgEnv -ne $expectedEntraEnv) {
+                throw "Cloud boundary mismatch: active MgGraph environment '$activeMgEnv' does not match target cloud '$TargetCloud' ('$expectedEntraEnv'). Use Connect-MgGraph -Environment $expectedEntraEnv."
+            }
+        }
+    }
 }
 
 function Invoke-GraphRequest {
@@ -66,9 +167,28 @@ function Invoke-GraphRequest {
                 $mockState['organization']
             }
             else {
-                @(@{ id = '00000000-0000-0000-0000-000000000000'; displayName = 'Contoso Sandbox' })
+                @(@{
+                    id              = '00000000-0000-0000-0000-000000000000'
+                    displayName     = 'Contoso Sandbox'
+                    verifiedDomains = @(
+                        @{ name = 'contoso.onmicrosoft.com'; isInitial = $true }
+                    )
+                })
             }
             $response = @{ value = $orgs }
+        }
+        elseif ($Uri -like '*/v1.0/sites/root*') {
+            $siteRoot = if ($mockState.ContainsKey('siteRoot')) {
+                $mockState['siteRoot']
+            }
+            else {
+                $defaultSpSuffix = if ($Uri -like '*graph.microsoft.us*') { '.sharepoint.us' } else { '.sharepoint.com' }
+                @{
+                    id     = 'contoso,00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000'
+                    webUrl = "https://contoso$defaultSpSuffix"
+                }
+            }
+            $response = $siteRoot
         }
         elseif ($Uri -like '*/beta/admin/microsoft365Apps/installationOptions*') {
             $opts = if ($mockState.ContainsKey('installationOptions')) {
@@ -142,13 +262,24 @@ function Invoke-GraphRequest {
             }
         }
         if ($Uri -like '*/v1.0/organization*') {
+            $domainSuffix = if ($Uri -like '*graph.microsoft.us*') { '.onmicrosoft.us' } else { '.onmicrosoft.com' }
             return @{
                 value = @(
                     @{
-                        id          = '00000000-0000-0000-0000-000000000000'
-                        displayName = 'Contoso Lab Tenant'
+                        id              = '00000000-0000-0000-0000-000000000000'
+                        displayName     = 'Contoso Lab Tenant'
+                        verifiedDomains = @(
+                            @{ name = "contoso$domainSuffix"; isInitial = $true }
+                        )
                     }
                 )
+            }
+        }
+        if ($Uri -like '*/v1.0/sites/root*') {
+            $spSuffix = if ($Uri -like '*graph.microsoft.us*') { '.sharepoint.us' } else { '.sharepoint.com' }
+            return @{
+                id     = 'contoso,00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000'
+                webUrl = "https://contoso$spSuffix"
             }
         }
         if ($Uri -like '*/beta/admin/microsoft365Apps/installationOptions*') {
@@ -209,10 +340,11 @@ function Invoke-GraphRequest {
 function Test-M365SubscribedSku {
     [CmdletBinding()]
     param(
+        [Parameter(Mandatory)][string]$GraphEndpoint,
         [Parameter(Mandatory)][bool]$IsDryRun
     )
 
-    $skuResponse = Invoke-GraphRequest -Method 'GET' -Uri 'https://graph.microsoft.com/v1.0/subscribedSkus' -IsDryRun $IsDryRun
+    $skuResponse = Invoke-GraphRequest -Method 'GET' -Uri "$GraphEndpoint/v1.0/subscribedSkus" -IsDryRun $IsDryRun
     $enabledPlans = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
     foreach ($sku in @($skuResponse['value'])) {
@@ -249,19 +381,39 @@ function Test-M365SubscribedSku {
     }
 }
 
-function Get-TenantOrganizationId {
+function Get-TenantOrganizationContext {
     [CmdletBinding()]
-    [OutputType([string])]
+    [OutputType([System.Collections.Hashtable], [System.Collections.Specialized.OrderedDictionary])]
     param(
+        [Parameter(Mandatory)][string]$GraphEndpoint,
+        [Parameter(Mandatory)][string]$SharePointSuffix,
         [Parameter(Mandatory)][bool]$IsDryRun
     )
 
-    $orgResponse = Invoke-GraphRequest -Method 'GET' -Uri 'https://graph.microsoft.com/v1.0/organization?$select=id,displayName' -IsDryRun $IsDryRun
+    $orgResponse = Invoke-GraphRequest -Method 'GET' -Uri "$GraphEndpoint/v1.0/organization?`$select=id,displayName,verifiedDomains" -IsDryRun $IsDryRun
     $orgs = @($orgResponse['value'])
     if ($orgs.Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$orgs[0]['id'])) {
         throw 'Unable to resolve dynamic tenant ID from Microsoft Graph organization endpoint.'
     }
-    return [string]$orgs[0]['id']
+    $tenantId = [string]$orgs[0]['id']
+
+    $siteResponse = Invoke-GraphRequest -Method 'GET' -Uri "$GraphEndpoint/v1.0/sites/root?`$select=id,webUrl" -IsDryRun $IsDryRun
+    $webUrl = if ($null -ne $siteResponse -and $siteResponse.ContainsKey('webUrl') -and -not [string]::IsNullOrWhiteSpace([string]$siteResponse['webUrl'])) {
+        [string]$siteResponse['webUrl']
+    }
+    else {
+        "https://contoso$SharePointSuffix"
+    }
+
+    if (-not $webUrl.EndsWith($SharePointSuffix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "SharePoint/OneDrive tenant root discovery mismatch: site webUrl '$webUrl' does not match expected cloud suffix '$SharePointSuffix'."
+    }
+
+    return [ordered]@{
+        tenantId         = $tenantId
+        sharePointWebUrl = $webUrl
+        sharePointSuffix = $SharePointSuffix
+    }
 }
 
 function ConvertTo-ConfigurationPolicyBody {
@@ -310,6 +462,37 @@ if (-not (Test-Path -LiteralPath $BaselinePath)) {
 $entraManifest = Get-Content -LiteralPath $EntraManifestPath -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
 $baseline = Get-Content -LiteralPath $BaselinePath -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
 
+$resolvedCloud = if ($PSBoundParameters.ContainsKey('Cloud')) {
+    $Cloud
+}
+elseif ($entraManifest.ContainsKey('cloud') -and -not [string]::IsNullOrWhiteSpace([string]$entraManifest['cloud'])) {
+    [string]$entraManifest['cloud']
+}
+else {
+    $Cloud
+}
+
+if ($resolvedCloud -notin @('commercial', 'usgov')) {
+    throw "Invalid cloud profile '$resolvedCloud' in '$EntraManifestPath'. Expected 'commercial' or 'usgov'."
+}
+
+$cloudConfig = Resolve-AvdCloudEnvironment -Cloud $resolvedCloud
+Test-AvdM365CloudBoundary -TargetCloud $resolvedCloud -CloudConfig $cloudConfig -EntraManifest $entraManifest -IsDryRun $isDryRun
+
+$graphEndpoint = ([string]$cloudConfig['graphEndpoint']).TrimEnd('/')
+$sharePointSuffix = [string]$cloudConfig['m365']['sharePointSuffix']
+$teamsDefaultMode = [string]$cloudConfig['capabilities']['teamsVdiDefaultMode']
+
+$teamsVdiMode = if ($resolvedCloud -eq 'usgov') {
+    $teamsDefaultMode
+}
+elseif ($baseline.ContainsKey('teamsVdi') -and $baseline['teamsVdi'].ContainsKey('vdiMediaOptimization') -and -not [string]::IsNullOrWhiteSpace([string]$baseline['teamsVdi']['vdiMediaOptimization'])) {
+    [string]$baseline['teamsVdi']['vdiMediaOptimization']
+}
+else {
+    $teamsDefaultMode
+}
+
 $environment = [string]$entraManifest['environment']
 if ($environment -notin @('dev', 'test', 'prod')) {
     throw "Invalid or missing 'environment' in '$EntraManifestPath': '$environment'."
@@ -331,25 +514,29 @@ $avdUsersGroupId = [string]$groups['avdUsersGroupId']
 $sessionHostsGroupId = [string]$groups['sessionHostsDynamicGroupId']
 $stamp = "[avd-ops-$prefix-$environment]"
 
-if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp)", 'Verify SKUs and deploy OneDrive KFM, Teams VDI, and M365 Apps baselines')) {
-    Test-M365SubscribedSku -IsDryRun $isDryRun
-    $tenantId = Get-TenantOrganizationId -IsDryRun $isDryRun
+if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp, cloud=$resolvedCloud)", 'Verify SKUs and deploy OneDrive KFM, Teams VDI, and M365 Apps baselines')) {
+    Test-M365SubscribedSku -GraphEndpoint $graphEndpoint -IsDryRun $isDryRun
+    $orgContext = Get-TenantOrganizationContext -GraphEndpoint $graphEndpoint -SharePointSuffix $sharePointSuffix -IsDryRun $isDryRun
+    $tenantId = [string]$orgContext['tenantId']
+    $sharePointWebUrl = [string]$orgContext['sharePointWebUrl']
 
-    [void](Invoke-GraphRequest -Method 'GET' -Uri 'https://graph.microsoft.com/beta/admin/microsoft365Apps/installationOptions' -IsDryRun $isDryRun)
+    [void](Invoke-GraphRequest -Method 'GET' -Uri "$graphEndpoint/beta/admin/microsoft365Apps/installationOptions" -IsDryRun $isDryRun)
 
-    $existingPoliciesResponse = Invoke-GraphRequest -Method 'GET' -Uri 'https://graph.microsoft.com/beta/deviceManagement/configurationPolicies' -IsDryRun $isDryRun
+    $existingPoliciesResponse = Invoke-GraphRequest -Method 'GET' -Uri "$graphEndpoint/beta/deviceManagement/configurationPolicies" -IsDryRun $isDryRun
     $existingPolicies = @($existingPoliciesResponse['value'])
 
     $policySpecs = @(
         [ordered]@{
             pillar      = 'oneDrive'
             displayName = "$stamp M365 OneDrive VDI & KFM Baseline"
-            description = "Managed by avd-m365 ($stamp). Configures OneDrive Silent Account Configuration, Known Folder Move (KFM), and Files On-Demand."
+            description = "Managed by avd-m365 ($stamp). Configures OneDrive Silent Account Configuration, Known Folder Move (KFM) against $sharePointSuffix, and Files On-Demand."
             values      = [ordered]@{
                 SilentAccountConfig  = [bool]$baseline['oneDrive']['silentAccountConfig']
                 KFMSilentOptIn       = [ordered]@{
-                    TenantId = $tenantId
-                    Folders  = @($baseline['oneDrive']['knownFolderMove'])
+                    TenantId         = $tenantId
+                    SharePointSuffix = $sharePointSuffix
+                    SharePointUrl    = $sharePointWebUrl
+                    Folders          = @($baseline['oneDrive']['knownFolderMove'])
                 }
                 FilesOnDemandEnabled = [bool]$baseline['oneDrive']['filesOnDemand']
             }
@@ -358,9 +545,9 @@ if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp)", 'Verify SKUs and de
         [ordered]@{
             pillar      = 'teamsVdi'
             displayName = "$stamp M365 Teams VDI Media Optimization"
-            description = "Managed by avd-m365 ($stamp). Configures Microsoft Teams VDI media optimization ($($baseline['teamsVdi']['vdiMediaOptimization'])) and GPU hardware acceleration."
+            description = "Managed by avd-m365 ($stamp). Configures Microsoft Teams VDI media optimization ($teamsVdiMode) and GPU hardware acceleration."
             values      = [ordered]@{
-                VdiMediaOptimization                    = [string]$baseline['teamsVdi']['vdiMediaOptimization']
+                VdiMediaOptimization                    = $teamsVdiMode
                 DisableGpuHardwareAccelerationInSession = [bool]$baseline['teamsVdi']['disableGpuHardwareAccelerationInSession']
             }
             targets     = @($avdUsersGroupId, $sessionHostsGroupId)
@@ -391,16 +578,16 @@ if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp)", 'Verify SKUs and de
 
         if ($null -ne $matched) {
             $policyId = [string]$matched['id']
-            $uri = "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/$policyId"
+            $uri = "$graphEndpoint/beta/deviceManagement/configurationPolicies/$policyId"
             [void](Invoke-GraphRequest -Method 'PATCH' -Uri $uri -Body $policyBody -IsDryRun $isDryRun)
             $wasCreated = $false
             $operation = 'updated'
         }
         else {
-            $createUri = 'https://graph.microsoft.com/beta/deviceManagement/configurationPolicies'
+            $createUri = "$graphEndpoint/beta/deviceManagement/configurationPolicies"
             $createdPolicy = Invoke-GraphRequest -Method 'POST' -Uri $createUri -Body $policyBody -IsDryRun $isDryRun
             $policyId = [string]$createdPolicy['id']
-            $uri = "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/$policyId"
+            $uri = "$graphEndpoint/beta/deviceManagement/configurationPolicies/$policyId"
             $wasCreated = $true
             $operation = 'created'
         }
@@ -415,7 +602,7 @@ if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp)", 'Verify SKUs and de
                 }
             }
         }
-        $assignUri = "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/$policyId/assign"
+        $assignUri = "$graphEndpoint/beta/deviceManagement/configurationPolicies/$policyId/assign"
         [void](Invoke-GraphRequest -Method 'POST' -Uri $assignUri -Body @{ assignments = $assignments } -IsDryRun $isDryRun)
 
         $runResources += [ordered]@{
@@ -431,20 +618,26 @@ if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp)", 'Verify SKUs and de
     }
 
     $runManifest = [ordered]@{
-        schema      = 'avd-ops-m365-run-manifest/v1'
-        environment = $environment
-        prefix      = $prefix
-        stamp       = $stamp
-        tenantId    = $tenantId
-        resources   = $runResources
+        schema           = 'avd-ops-m365-run-manifest/v1'
+        environment      = $environment
+        cloud            = $resolvedCloud
+        prefix           = $prefix
+        stamp            = $stamp
+        tenantId         = $tenantId
+        sharePointSuffix = $sharePointSuffix
+        teamsVdiMode     = $teamsVdiMode
+        resources        = $runResources
     }
     $runManifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $RunManifestPath -Encoding utf8
 
     $m365Manifest = [ordered]@{
         schema                          = 'avd-ops-m365-manifest/v1'
         environment                     = $environment
+        cloud                           = $resolvedCloud
+        sharePointSuffix                = $sharePointSuffix
+        teamsVdiMode                    = $teamsVdiMode
         oneDriveKfmEnabled              = [bool]($baseline['oneDrive']['silentAccountConfig'] -and (@($baseline['oneDrive']['knownFolderMove']).Count -gt 0))
-        teamsVdiOptimizationEnabled     = [bool]($baseline['teamsVdi']['vdiMediaOptimization'] -eq 'SlimCoreAndWebRtc')
+        teamsVdiOptimizationEnabled     = [bool]($teamsVdiMode -in @('SlimCore', 'SlimCoreAndWebRtc', 'WebRtc'))
         sharedComputerActivationEnabled = [bool]$baseline['m365Apps']['sharedComputerLicensing']
     }
     $m365Manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $OutputPath -Encoding utf8
