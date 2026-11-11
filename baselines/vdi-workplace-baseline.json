@@ -17,5 +17,15 @@
     "sharedComputerLicensing": true,
     "updateChannel": "MonthlyEnterprise",
     "outlookCachedExchangeSyncMonths": 3
+  },
+  "cloudProfiles": {
+    "commercial": {
+      "sharePointSuffix": ".sharepoint.com",
+      "teamsVdiDefaultMode": "SlimCore"
+    },
+    "usgov": {
+      "sharePointSuffix": ".sharepoint.us",
+      "teamsVdiDefaultMode": "WebRtc"
+    }
   }
 }

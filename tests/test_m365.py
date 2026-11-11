@@ -20,8 +20,8 @@ import validate  # noqa: E402
 
 def find_pwsh() -> str:
     """Resolve PowerShell 7 executable."""
-    for candidate in ("pwsh", "pwsh.exe"):
-        path = shutil.which(candidate)
+    for candidate in ("pwsh", "pwsh.exe", "/home/antigravity/.local/bin/pwsh"):
+        path = shutil.which(candidate) or (candidate if Path(candidate).is_file() else None)
         if path:
             return path
     raise RuntimeError("pwsh not found on PATH")
@@ -36,7 +36,7 @@ def find_bash() -> str | None:
 
 
 class TestM365ControlPlane(unittest.TestCase):
-    """Test suite for avd-m365 validation, idempotent CRUD, SKU checks, and teardown."""
+    """Test suite for avd-m365 validation, idempotent CRUD, SKU checks, USGov/GCC High, and teardown."""
 
     def setUp(self) -> None:
         self.pwsh = find_pwsh()
@@ -49,6 +49,7 @@ class TestM365ControlPlane(unittest.TestCase):
         entra_payload = {
             "schema": "avd-ops-entra-manifest/v1",
             "environment": "dev",
+            "cloud": "commercial",
             "prefix": "avd",
             "groups": {
                 "avdUsersGroupId": "00000000-0000-0000-0000-000000000011",
@@ -65,9 +66,15 @@ class TestM365ControlPlane(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_repo_and_schema_validation(self) -> None:
-        """Verify repository JSON files, baseline rules, and contract validator."""
+        """Verify repository JSON files, C26 contract, baseline rules, and contract validator."""
         errors = validate.run_validation()
         self.assertEqual(errors, [])
+
+        c26_path = ROOT / "contracts" / "cloud-environments.json"
+        self.assertTrue(c26_path.is_file())
+        c26_data = json.loads(c26_path.read_text(encoding="utf-8"))
+        self.assertEqual(c26_data["schema"], "avd-cloud-environments/v1")
+        self.assertEqual(c26_data["clouds"]["usgov"]["graphEndpoint"], "https://graph.microsoft.us")
 
         bad_manifest = self.temp_dir / "bad-manifest.json"
         bad_manifest.write_text(
@@ -173,6 +180,7 @@ class TestM365ControlPlane(unittest.TestCase):
 
         run_manifest_1 = json.loads(self.run_manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(run_manifest_1["stamp"], "[avd-ops-avd-dev]")
+        self.assertEqual(run_manifest_1["cloud"], "commercial")
         self.assertEqual(run_manifest_1["tenantId"], tenant_id)
         self.assertEqual(len(run_manifest_1["resources"]), 3)
         for res in run_manifest_1["resources"]:
@@ -186,6 +194,9 @@ class TestM365ControlPlane(unittest.TestCase):
             {
                 "schema": "avd-ops-m365-manifest/v1",
                 "environment": "dev",
+                "cloud": "commercial",
+                "sharePointSuffix": ".sharepoint.com",
+                "teamsVdiMode": "SlimCoreAndWebRtc",
                 "oneDriveKfmEnabled": True,
                 "teamsVdiOptimizationEnabled": True,
                 "sharedComputerActivationEnabled": True,
@@ -218,6 +229,139 @@ class TestM365ControlPlane(unittest.TestCase):
         ]
         self.assertEqual(len(patch_calls), 3)
 
+    def test_usgov_gcc_high_routing_sharepoint_us_and_webrtc_mode(self) -> None:
+        """Verify usgov profile routes to graph.microsoft.us, validates .sharepoint.us, and sets WebRtc Teams mode."""
+        tenant_id = "00000000-0000-0000-0000-000000000088"
+        entra_usgov = json.loads(self.entra_manifest_path.read_text(encoding="utf-8"))
+        entra_usgov["cloud"] = "usgov"
+        self.entra_manifest_path.write_text(json.dumps(entra_usgov, indent=2), encoding="utf-8")
+
+        mock_state = {
+            "azEnvironment": "AzureUSGovernment",
+            "mgEnvironment": "USGov",
+            "subscribedSkus": [
+                {
+                    "skuPartNumber": "SPE_E5_USGOV_GCCHIGH",
+                    "capabilityStatus": "Enabled",
+                    "servicePlans": [
+                        {"servicePlanName": "SHAREPOINTENTERPRISE", "provisioningStatus": "Success"},
+                        {"servicePlanName": "TEAMS1", "provisioningStatus": "Success"},
+                        {"servicePlanName": "OFFICESUBSCRIPTION", "provisioningStatus": "Success"},
+                    ],
+                }
+            ],
+            "organization": [
+                {
+                    "id": tenant_id,
+                    "displayName": "Contoso USGov Sandbox",
+                    "verifiedDomains": [{"name": "contoso.onmicrosoft.us", "isInitial": True}],
+                }
+            ],
+            "siteRoot": {
+                "id": f"contoso,{tenant_id},00000000-0000-0000-0000-000000000001",
+                "webUrl": "https://contoso.sharepoint.us",
+            },
+            "configurationPolicies": [],
+        }
+        self.mock_graph_path.write_text(json.dumps(mock_state, indent=2), encoding="utf-8")
+
+        env = os.environ.copy()
+        env["AVD_OPS_MOCK_GRAPH_PATH"] = str(self.mock_graph_path)
+
+        proc = subprocess.run(
+            [
+                self.pwsh,
+                "-NoProfile",
+                "-File",
+                str(ROOT / "scripts" / "Deploy-AvdM365.ps1"),
+                "-EntraManifestPath",
+                str(self.entra_manifest_path),
+                "-OutputPath",
+                str(self.m365_manifest_path),
+                "-RunManifestPath",
+                str(self.run_manifest_path),
+                "-Cloud",
+                "usgov",
+                "-Confirm:$false",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
+
+        m365_manifest = json.loads(self.m365_manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            m365_manifest,
+            {
+                "schema": "avd-ops-m365-manifest/v1",
+                "environment": "dev",
+                "cloud": "usgov",
+                "sharePointSuffix": ".sharepoint.us",
+                "teamsVdiMode": "WebRtc",
+                "oneDriveKfmEnabled": True,
+                "teamsVdiOptimizationEnabled": True,
+                "sharedComputerActivationEnabled": True,
+            },
+        )
+        self.assertEqual(validate.run_validation(manifest_paths=[self.m365_manifest_path]), [])
+
+        state_after = json.loads(self.mock_graph_path.read_text(encoding="utf-8"))
+        self.assertGreater(len(state_after["requests"]), 0)
+        for req in state_after["requests"]:
+            self.assertTrue(req["uri"].startswith("https://graph.microsoft.us/"), msg=req["uri"])
+            self.assertNotIn("graph.microsoft.com", req["uri"])
+
+        onedrive_pol = next(
+            p for p in state_after["configurationPolicies"] if "OneDrive" in p["name"]
+        )
+        self.assertIn(".sharepoint.us", json.dumps(onedrive_pol["settings"]))
+
+        teams_pol = next(
+            p for p in state_after["configurationPolicies"] if "Teams VDI" in p["name"]
+        )
+        self.assertIn("WebRtc", json.dumps(teams_pol["settings"]))
+        self.assertNotIn("SlimCoreAndWebRtc", json.dumps(teams_pol["settings"]))
+
+    def test_cross_cloud_mismatch_fails_closed(self) -> None:
+        """Verify Deploy-AvdM365.ps1 aborts before issuing any Graph calls on cloud mismatch."""
+        mock_state = {
+            "subscribedSkus": [],
+            "requests": [],
+        }
+        self.mock_graph_path.write_text(json.dumps(mock_state, indent=2), encoding="utf-8")
+
+        env = os.environ.copy()
+        env["AVD_OPS_MOCK_GRAPH_PATH"] = str(self.mock_graph_path)
+
+        # entra-manifest.json has cloud='commercial', but -Cloud 'usgov' is passed
+        proc = subprocess.run(
+            [
+                self.pwsh,
+                "-NoProfile",
+                "-File",
+                str(ROOT / "scripts" / "Deploy-AvdM365.ps1"),
+                "-EntraManifestPath",
+                str(self.entra_manifest_path),
+                "-OutputPath",
+                str(self.m365_manifest_path),
+                "-RunManifestPath",
+                str(self.run_manifest_path),
+                "-Cloud",
+                "usgov",
+                "-Confirm:$false",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Cloud boundary mismatch", proc.stderr + proc.stdout)
+        state_after = json.loads(self.mock_graph_path.read_text(encoding="utf-8"))
+        self.assertEqual(state_after.get("requests", []), [])
+
     def test_remove_enforces_discard_last_copy_and_selective_deletion(self) -> None:
         """Verify Remove-AvdM365.ps1 requires -DiscardLastCopy and only deletes created stamped policies."""
         mock_state = {
@@ -233,6 +377,7 @@ class TestM365ControlPlane(unittest.TestCase):
         run_manifest = {
             "schema": "avd-ops-m365-run-manifest/v1",
             "environment": "dev",
+            "cloud": "commercial",
             "prefix": "avd",
             "stamp": "[avd-ops-avd-dev]",
             "resources": [
@@ -318,13 +463,14 @@ class TestM365ControlPlane(unittest.TestCase):
         self.assertTrue(delete_calls[0]["uri"].endswith("00000000-0000-0000-0000-000000000001"))
 
     def test_bash_wrapper_dry_run(self) -> None:
-        """Verify deploy-m365.sh executes Deploy-AvdM365.ps1 in dry-run mode and validates output."""
+        """Verify deploy-m365.sh executes Deploy-AvdM365.ps1 in dry-run mode (commercial and usgov) and validates output."""
         bash_exe = find_bash()
         if not bash_exe:
             self.skipTest("bash not available")
 
         env = os.environ.copy()
         env["AVD_OPS_DRY_RUN"] = "1"
+        env["PATH"] = f"{Path(self.pwsh).parent}{os.pathsep}{env.get('PATH', '')}"
 
         proc = subprocess.run(
             [
@@ -343,6 +489,48 @@ class TestM365ControlPlane(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
         self.assertTrue(self.m365_manifest_path.is_file())
         self.assertTrue(self.run_manifest_path.is_file())
+
+        # Also test --cloud usgov via deploy-m365.sh
+        entra_usgov = json.loads(self.entra_manifest_path.read_text(encoding="utf-8"))
+        entra_usgov["cloud"] = "usgov"
+        self.entra_manifest_path.write_text(json.dumps(entra_usgov, indent=2), encoding="utf-8")
+
+        proc_gov = subprocess.run(
+            [
+                bash_exe,
+                str(ROOT / "scripts" / "deploy-m365.sh"),
+                "--cloud",
+                "usgov",
+                str(self.entra_manifest_path),
+                str(self.m365_manifest_path),
+                str(ROOT / "baselines" / "vdi-workplace-baseline.json"),
+                str(self.run_manifest_path),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc_gov.returncode, 0, msg=proc_gov.stderr + proc_gov.stdout)
+        gov_manifest = json.loads(self.m365_manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(gov_manifest["cloud"], "usgov")
+        self.assertEqual(gov_manifest["sharePointSuffix"], ".sharepoint.us")
+        self.assertEqual(gov_manifest["teamsVdiMode"], "WebRtc")
+
+    def test_usgov_pester_suite(self) -> None:
+        """Execute tests/UsGovCloud.Tests.ps1 in PowerShell 7."""
+        proc = subprocess.run(
+            [
+                self.pwsh,
+                "-NoProfile",
+                "-File",
+                str(ROOT / "tests" / "UsGovCloud.Tests.ps1"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
 
 
 if __name__ == "__main__":
