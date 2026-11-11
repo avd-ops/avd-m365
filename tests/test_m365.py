@@ -470,7 +470,7 @@ class TestM365ControlPlane(unittest.TestCase):
 
         env = os.environ.copy()
         env["AVD_OPS_DRY_RUN"] = "1"
-        env["PATH"] = f"{Path(self.pwsh).parent}:{env.get('PATH', '')}"
+        env["PATH"] = f"{Path(self.pwsh).parent}{os.pathsep}{env.get('PATH', '')}"
 
         proc = subprocess.run(
             [

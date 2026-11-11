@@ -109,7 +109,11 @@ function Test-AvdM365CloudBoundary {
         }
     }
 
-    $azCtxCmd = Get-Command 'Get-AzContext' -ErrorAction SilentlyContinue
+    $skipLiveSessionCheck = $IsDryRun -or -not [string]::IsNullOrWhiteSpace($mockPath)
+    $azCtxCmd = Get-Item -LiteralPath 'Function:Get-AzContext' -ErrorAction SilentlyContinue
+    if ($null -eq $azCtxCmd -and -not $skipLiveSessionCheck -and $null -ne (Get-Module -Name 'Az.Accounts')) {
+        $azCtxCmd = Get-Command 'Get-AzContext' -ErrorAction SilentlyContinue
+    }
     if ($null -ne $azCtxCmd) {
         $azCtx = & $azCtxCmd -ErrorAction SilentlyContinue
         if ($null -ne $azCtx -and $null -ne $azCtx.Environment -and -not [string]::IsNullOrWhiteSpace([string]$azCtx.Environment.Name)) {
@@ -120,7 +124,10 @@ function Test-AvdM365CloudBoundary {
         }
     }
 
-    $mgCtxCmd = Get-Command 'Get-MgContext' -ErrorAction SilentlyContinue
+    $mgCtxCmd = Get-Item -LiteralPath 'Function:Get-MgContext' -ErrorAction SilentlyContinue
+    if ($null -eq $mgCtxCmd -and -not $skipLiveSessionCheck -and $null -ne (Get-Module -Name 'Microsoft.Graph.Authentication')) {
+        $mgCtxCmd = Get-Command 'Get-MgContext' -ErrorAction SilentlyContinue
+    }
     if ($null -ne $mgCtxCmd) {
         $mgCtx = & $mgCtxCmd -ErrorAction SilentlyContinue
         if ($null -ne $mgCtx -and -not [string]::IsNullOrWhiteSpace([string]$mgCtx.Environment)) {
@@ -129,6 +136,9 @@ function Test-AvdM365CloudBoundary {
                 throw "Cloud boundary mismatch: active MgGraph environment '$activeMgEnv' does not match target cloud '$TargetCloud' ('$expectedEntraEnv'). Use Connect-MgGraph -Environment $expectedEntraEnv."
             }
         }
+    }
+    if (Test-Path -LiteralPath 'Alias:Invoke-GraphRequest') {
+        Remove-Item -LiteralPath 'Alias:Invoke-GraphRequest' -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -644,6 +654,7 @@ if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp, cloud=$resolvedCloud)
 
     $pythonExe = Get-PythonCommand
     $validateScript = Join-Path $PSScriptRoot 'validate.py'
+    $global:LASTEXITCODE = 0
     & $pythonExe $validateScript --manifest $OutputPath --baseline $BaselinePath
     if ($LASTEXITCODE -ne 0) {
         throw "Contract validation failed for emitted manifest '$OutputPath'."
