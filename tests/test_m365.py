@@ -213,6 +213,7 @@ class TestM365ControlPlane(unittest.TestCase):
                 "oneDriveKfmEnabled": True,
                 "teamsVdiOptimizationEnabled": True,
                 "sharedComputerActivationEnabled": True,
+                "sharePointBaselineApplied": True,
             },
         )
         self.assertEqual(validate.run_validation(manifest_paths=[self.m365_manifest_path]), [])
@@ -320,6 +321,7 @@ class TestM365ControlPlane(unittest.TestCase):
                 "oneDriveKfmEnabled": True,
                 "teamsVdiOptimizationEnabled": True,
                 "sharedComputerActivationEnabled": True,
+                "sharePointBaselineApplied": True,
             },
         )
         self.assertEqual(validate.run_validation(manifest_paths=[self.m365_manifest_path]), [])

@@ -54,6 +54,9 @@
     },
     "sharedComputerActivationEnabled": {
       "type": "boolean"
+    },
+    "sharePointBaselineApplied": {
+      "type": "boolean"
     }
   }
 }
