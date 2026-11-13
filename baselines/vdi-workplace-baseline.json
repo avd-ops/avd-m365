@@ -18,6 +18,21 @@
     "updateChannel": "MonthlyEnterprise",
     "outlookCachedExchangeSyncMonths": 3
   },
+  "sharePoint": {
+    "sharingCapability": "existingExternalUserSharingOnly",
+    "isUnmanagedSyncAppForTenantRestricted": false,
+    "isResharingByExternalUsersEnabled": false,
+    "isFileActivityNotificationEnabled": true,
+    "idleSessionSignOut": {
+      "isEnabled": true,
+      "warnAfterInSeconds": 2700,
+      "signOutAfterInSeconds": 3600
+    },
+    "excludedFileExtensionsForSyncApp": [
+      ".pst",
+      ".ost"
+    ]
+  },
   "cloudProfiles": {
     "commercial": {
       "sharePointSuffix": ".sharepoint.com",

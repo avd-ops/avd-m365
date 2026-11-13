@@ -95,6 +95,15 @@ class TestM365ControlPlane(unittest.TestCase):
         self.assertTrue(any("additional property 'extraField'" in e for e in manifest_errors))
         self.assertTrue(any("must equal 'avd-ops-m365-manifest/v1'" in e for e in manifest_errors))
 
+        bad_baseline = json.loads((ROOT / "baselines" / "vdi-workplace-baseline.json").read_text(encoding="utf-8"))
+        bad_baseline["sharePoint"]["sharingCapability"] = "invalidMode"
+        bad_baseline["sharePoint"]["idleSessionSignOut"]["signOutAfterInSeconds"] = 60
+        bad_baseline["sharePoint"]["idleSessionSignOut"]["warnAfterInSeconds"] = 120
+        baseline_errors: list[str] = []
+        validate.validate_baseline_data(bad_baseline, "bad-baseline.json", baseline_errors)
+        self.assertTrue(any("sharePoint.sharingCapability" in e for e in baseline_errors))
+        self.assertTrue(any("signOutAfterInSeconds" in e for e in baseline_errors))
+
     def test_preflight_sku_check_rejects_missing_service_plans(self) -> None:
         """Verify Deploy-AvdM365.ps1 fails in preflight when required M365 SKUs are absent."""
         mock_state = {
@@ -182,11 +191,15 @@ class TestM365ControlPlane(unittest.TestCase):
         self.assertEqual(run_manifest_1["stamp"], "[avd-ops-avd-dev]")
         self.assertEqual(run_manifest_1["cloud"], "commercial")
         self.assertEqual(run_manifest_1["tenantId"], tenant_id)
-        self.assertEqual(len(run_manifest_1["resources"]), 3)
+        self.assertEqual(len(run_manifest_1["resources"]), 4)
         for res in run_manifest_1["resources"]:
-            self.assertTrue(res["created"])
-            self.assertEqual(res["operation"], "created")
             self.assertTrue(res["displayName"].startswith("[avd-ops-avd-dev]"))
+            if res["resourceType"] == "sharepointTenantSettings":
+                self.assertFalse(res["created"])
+                self.assertEqual(res["operation"], "updated")
+            else:
+                self.assertTrue(res["created"])
+                self.assertEqual(res["operation"], "created")
 
         m365_manifest = json.loads(self.m365_manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -207,6 +220,10 @@ class TestM365ControlPlane(unittest.TestCase):
         # Verify dynamic tenant ID was embedded in the OneDrive KFM policy settings
         state_after_first = json.loads(self.mock_graph_path.read_text(encoding="utf-8"))
         self.assertEqual(len(state_after_first["configurationPolicies"]), 3)
+        self.assertEqual(
+            state_after_first["sharepointSettings"]["sharingCapability"],
+            "existingExternalUserSharingOnly",
+        )
         onedrive_pol = next(
             p for p in state_after_first["configurationPolicies"] if "OneDrive" in p["name"]
         )
@@ -217,7 +234,7 @@ class TestM365ControlPlane(unittest.TestCase):
         self.assertEqual(second.returncode, 0, msg=second.stderr + second.stdout)
 
         run_manifest_2 = json.loads(self.run_manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(len(run_manifest_2["resources"]), 3)
+        self.assertEqual(len(run_manifest_2["resources"]), 4)
         for res in run_manifest_2["resources"]:
             self.assertFalse(res["created"])
             self.assertEqual(res["operation"], "updated")
@@ -227,7 +244,7 @@ class TestM365ControlPlane(unittest.TestCase):
         patch_calls = [
             r for r in state_after_second["requests"] if r["method"] == "PATCH"
         ]
-        self.assertEqual(len(patch_calls), 3)
+        self.assertEqual(len(patch_calls), 5)
 
     def test_usgov_gcc_high_routing_sharepoint_us_and_webrtc_mode(self) -> None:
         """Verify usgov profile routes to graph.microsoft.us, validates .sharepoint.us, and sets WebRtc Teams mode."""
@@ -323,6 +340,12 @@ class TestM365ControlPlane(unittest.TestCase):
         )
         self.assertIn("WebRtc", json.dumps(teams_pol["settings"]))
         self.assertNotIn("SlimCoreAndWebRtc", json.dumps(teams_pol["settings"]))
+        self.assertTrue(
+            any(
+                r["method"] == "PATCH" and r["uri"] == "https://graph.microsoft.us/v1.0/admin/sharepoint/settings"
+                for r in state_after["requests"]
+            )
+        )
 
     def test_cross_cloud_mismatch_fails_closed(self) -> None:
         """Verify Deploy-AvdM365.ps1 aborts before issuing any Graph calls on cloud mismatch."""
@@ -401,6 +424,13 @@ class TestM365ControlPlane(unittest.TestCase):
                     "resourceType": "deviceManagementConfigurationPolicy",
                     "uri": "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/00000000-0000-0000-0000-000000000003",
                     "created": True,
+                },
+                {
+                    "id": "sharepoint-tenant-settings",
+                    "displayName": "[avd-ops-avd-dev] M365 SharePoint Tenant Settings Baseline",
+                    "resourceType": "sharepointTenantSettings",
+                    "uri": "https://graph.microsoft.com/v1.0/admin/sharepoint/settings",
+                    "created": False,
                 },
             ],
         }
