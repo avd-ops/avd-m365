@@ -711,6 +711,7 @@ if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp, cloud=$resolvedCloud)
         oneDriveKfmEnabled              = [bool]($baseline['oneDrive']['silentAccountConfig'] -and (@($baseline['oneDrive']['knownFolderMove']).Count -gt 0))
         teamsVdiOptimizationEnabled     = [bool]($teamsVdiMode -in @('SlimCore', 'SlimCoreAndWebRtc', 'WebRtc'))
         sharedComputerActivationEnabled = [bool]$baseline['m365Apps']['sharedComputerLicensing']
+        sharePointBaselineApplied       = [bool]($baseline.ContainsKey('sharePoint') -and $null -ne $baseline['sharePoint'])
     }
     $m365Manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $OutputPath -Encoding utf8
 
