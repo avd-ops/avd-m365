@@ -64,4 +64,4 @@ else
   python "${SCRIPT_DIR}/validate.py" --manifest "${OUT_FILE}" --baseline "${BASELINE_FILE}"
 fi
 
-echo "Configured and validated greenfield M365 OneDrive, Teams VDI and M365 Apps baselines (cloud: ${CLOUD}, input: ${ENTRA_MANIFEST}, output: ${OUT_FILE})."
+echo "Configured and validated greenfield M365 OneDrive, SharePoint, Teams VDI and M365 Apps baselines (cloud: ${CLOUD}, input: ${ENTRA_MANIFEST}, output: ${OUT_FILE})."

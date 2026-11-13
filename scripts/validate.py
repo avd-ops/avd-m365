@@ -110,6 +110,44 @@ def validate_baseline_data(data: Any, label: str, errors: list[str]) -> None:
         if not isinstance(months, int) or isinstance(months, bool) or not (1 <= months <= 24):
             errors.append(f"{label}: 'm365Apps.outlookCachedExchangeSyncMonths' must be an integer between 1 and 24")
 
+    sharepoint = data.get("sharePoint")
+    if sharepoint is not None:
+        if not isinstance(sharepoint, dict):
+            errors.append(f"{label}: 'sharePoint' must be an object")
+        else:
+            valid_sharing = (
+                "disabled",
+                "externalUserSharingOnly",
+                "externalUserAndGuestSharing",
+                "existingExternalUserSharingOnly",
+            )
+            if sharepoint.get("sharingCapability") not in valid_sharing:
+                errors.append(f"{label}: 'sharePoint.sharingCapability' must be one of {list(valid_sharing)}")
+            for bool_key in (
+                "isUnmanagedSyncAppForTenantRestricted",
+                "isResharingByExternalUsersEnabled",
+                "isFileActivityNotificationEnabled",
+            ):
+                if not isinstance(sharepoint.get(bool_key), bool):
+                    errors.append(f"{label}: 'sharePoint.{bool_key}' must be a boolean")
+            idle = sharepoint.get("idleSessionSignOut")
+            if not isinstance(idle, dict):
+                errors.append(f"{label}: 'sharePoint.idleSessionSignOut' must be an object")
+            else:
+                if not isinstance(idle.get("isEnabled"), bool):
+                    errors.append(f"{label}: 'sharePoint.idleSessionSignOut.isEnabled' must be a boolean")
+                warn_s = idle.get("warnAfterInSeconds")
+                signout_s = idle.get("signOutAfterInSeconds")
+                if not isinstance(warn_s, int) or isinstance(warn_s, bool) or warn_s <= 0:
+                    errors.append(f"{label}: 'sharePoint.idleSessionSignOut.warnAfterInSeconds' must be a positive integer")
+                if not isinstance(signout_s, int) or isinstance(signout_s, bool) or signout_s <= 0:
+                    errors.append(f"{label}: 'sharePoint.idleSessionSignOut.signOutAfterInSeconds' must be a positive integer")
+                if isinstance(warn_s, int) and not isinstance(warn_s, bool) and isinstance(signout_s, int) and not isinstance(signout_s, bool) and signout_s < warn_s:
+                    errors.append(f"{label}: 'sharePoint.idleSessionSignOut.signOutAfterInSeconds' must be >= 'warnAfterInSeconds'")
+            excluded = sharepoint.get("excludedFileExtensionsForSyncApp")
+            if not isinstance(excluded, list) or not all(isinstance(ext, str) and ext.startswith(".") and len(ext) > 1 for ext in excluded):
+                errors.append(f"{label}: 'sharePoint.excludedFileExtensionsForSyncApp' must be a list of file extensions starting with '.'")
+
     cloud_profiles = data.get("cloudProfiles")
     if cloud_profiles is not None:
         if not isinstance(cloud_profiles, dict):

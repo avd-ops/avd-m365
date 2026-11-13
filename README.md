@@ -17,6 +17,7 @@ Greenfield Microsoft 365 workplace and VDI productivity control plane (`avd-m365
 ## What it does
 
 - Configures OneDrive for Business Silent Account Configuration, Known Folder Move (KFM), and VDI sync baselines.
+- Configures SharePoint tenant settings (external sharing guardrails, idle session sign-out, and VDI sync file exclusions).
 - Applies Microsoft Teams VDI media optimization policies and meeting baselines.
 - Configures Microsoft 365 Apps Shared Computer Activation and Exchange Online / Outlook caching defaults for FSLogix containers.
 - Verifies required M365 tenant SKUs in preflight without purchasing recurring commitments.

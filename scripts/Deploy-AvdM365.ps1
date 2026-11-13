@@ -209,6 +209,26 @@ function Invoke-GraphRequest {
             }
             $response = $opts
         }
+        elseif ($Uri -like '*/v1.0/admin/sharepoint/settings*') {
+            $spSettings = if ($mockState.ContainsKey('sharepointSettings')) {
+                $mockState['sharepointSettings']
+            }
+            else {
+                @{
+                    sharingCapability                    = 'externalUserAndGuestSharing'
+                    isUnmanagedSyncAppForTenantRestricted = $false
+                    isResharingByExternalUsersEnabled    = $true
+                    isFileActivityNotificationEnabled    = $true
+                }
+            }
+            if ($Method -eq 'PATCH' -and $null -ne $Body) {
+                foreach ($k in $Body.Keys) {
+                    $spSettings[$k] = $Body[$k]
+                }
+                $mockState['sharepointSettings'] = $spSettings
+            }
+            $response = $spSettings
+        }
         elseif ($Uri -like '*/beta/deviceManagement/configurationPolicies/*/assign') {
             $response = @{ status = 'assigned' }
         }
@@ -296,6 +316,17 @@ function Invoke-GraphRequest {
             return @{
                 updateChannel  = 'monthlyEnterprise'
                 appsForWindows = @{ isMicrosoft365AppsEnabled = $true }
+            }
+        }
+        if ($Uri -like '*/v1.0/admin/sharepoint/settings*') {
+            if ($Method -eq 'PATCH' -and $null -ne $Body) {
+                return $Body
+            }
+            return @{
+                sharingCapability                    = 'externalUserAndGuestSharing'
+                isUnmanagedSyncAppForTenantRestricted = $false
+                isResharingByExternalUsersEnabled    = $true
+                isFileActivityNotificationEnabled    = $true
             }
         }
         if ($Uri -like '*/beta/deviceManagement/configurationPolicies/*/assign') {
@@ -624,6 +655,37 @@ if ($PSCmdlet.ShouldProcess("Microsoft 365 tenant ($stamp, cloud=$resolvedCloud)
             assignedTo   = $uniqueGroups
             created      = $wasCreated
             operation    = $operation
+        }
+    }
+
+    if ($baseline.ContainsKey('sharePoint') -and $null -ne $baseline['sharePoint']) {
+        $spUri = "$graphEndpoint/v1.0/admin/sharepoint/settings"
+        [void](Invoke-GraphRequest -Method 'GET' -Uri $spUri -IsDryRun $isDryRun)
+
+        $spBaseline = $baseline['sharePoint']
+        $spBody = [ordered]@{
+            sharingCapability                    = [string]$spBaseline['sharingCapability']
+            isUnmanagedSyncAppForTenantRestricted = [bool]$spBaseline['isUnmanagedSyncAppForTenantRestricted']
+            isResharingByExternalUsersEnabled    = [bool]$spBaseline['isResharingByExternalUsersEnabled']
+            isFileActivityNotificationEnabled    = [bool]$spBaseline['isFileActivityNotificationEnabled']
+            idleSessionSignOut                   = [ordered]@{
+                isEnabled             = [bool]$spBaseline['idleSessionSignOut']['isEnabled']
+                warnAfterInSeconds    = [int]$spBaseline['idleSessionSignOut']['warnAfterInSeconds']
+                signOutAfterInSeconds = [int]$spBaseline['idleSessionSignOut']['signOutAfterInSeconds']
+            }
+            excludedFileExtensionsForSyncApp     = @($spBaseline['excludedFileExtensionsForSyncApp'])
+        }
+        [void](Invoke-GraphRequest -Method 'PATCH' -Uri $spUri -Body $spBody -IsDryRun $isDryRun)
+
+        $runResources += [ordered]@{
+            id           = 'sharepoint-tenant-settings'
+            displayName  = "$stamp M365 SharePoint Tenant Settings Baseline"
+            resourceType = 'sharepointTenantSettings'
+            pillar       = 'sharePoint'
+            uri          = $spUri
+            assignedTo   = @()
+            created      = $false
+            operation    = 'updated'
         }
     }
 
