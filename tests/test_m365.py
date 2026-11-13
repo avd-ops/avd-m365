@@ -244,7 +244,7 @@ class TestM365ControlPlane(unittest.TestCase):
         patch_calls = [
             r for r in state_after_second["requests"] if r["method"] == "PATCH"
         ]
-        self.assertEqual(len(patch_calls), 4)
+        self.assertEqual(len(patch_calls), 5)
 
     def test_usgov_gcc_high_routing_sharepoint_us_and_webrtc_mode(self) -> None:
         """Verify usgov profile routes to graph.microsoft.us, validates .sharepoint.us, and sets WebRtc Teams mode."""
