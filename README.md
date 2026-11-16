@@ -2,6 +2,8 @@
 
 Part of [avd-ops](https://avd-ops.dev/), the open toolkit for Azure Virtual Desktop.
 
+Greenfield Microsoft 365 workplace and VDI productivity control plane (`avd-m365`), orchestrated by [avd-landing-zone](https://github.com/avd-ops/avd-landing-zone#readme) ([avd-ops docs](https://avd-ops.dev/docs/repos/avd-m365.html), [decision 0009](https://avd-ops.dev/docs/decisions/0009-split-landing-zone-into-five-control-planes.html)).
+
 > [!WARNING]
 > **Personal project. Research and learning only. Not for production. No warranty.**
 >
@@ -10,9 +12,14 @@ Part of [avd-ops](https://avd-ops.dev/), the open toolkit for Azure Virtual Desk
 > - It is provided **"as is", without warranty of any kind**, under the [MIT License](LICENSE). You use it at your own risk.
 > - **Contributions and forks are welcome and encouraged.** See [Contributing](#contributing).
 
-## Role in avd-ops
+## How it connects
 
-Greenfield Microsoft 365 workplace and VDI productivity control plane (`avd-m365`), orchestrated by [avd-landing-zone](https://github.com/avd-ops/avd-landing-zone) ([decision 0009](https://avd-ops.dev/docs/decisions/0009-split-landing-zone-into-five-control-planes.html)).
+| Direction | Repo | Relationship |
+|---|---|---|
+| Front door | [avd-ops](https://github.com/avd-ops/avd-ops#readme) | Overview, [repo page](https://avd-ops.dev/docs/repos/avd-m365.html), and platform decisions |
+| Orchestrator | [avd-landing-zone](https://github.com/avd-ops/avd-landing-zone#readme) | Invokes `avd-m365` in the multi-plane deployment pipeline |
+| Upstream | [avd-entra](https://github.com/avd-ops/avd-entra#readme) | Supplies `entra-manifest.json` user group targets |
+| Assess & remediate | [avd-assess](https://github.com/avd-ops/avd-assess#readme) / [avd-remediate](https://github.com/avd-ops/avd-remediate#readme) | M365 VDI standards (`methods/m365.md`) and `C24` remediation plane |
 
 ## What it does
 
@@ -26,6 +33,11 @@ Greenfield Microsoft 365 workplace and VDI productivity control plane (`avd-m365
 ## Contracts
 
 Consumes `entra-manifest.json` user group targets and produces `m365-manifest.json` (OneDrive, Teams VDI, and M365 Apps readiness facts).
+
+## Docs
+
+- Agent instructions & guardrails: [AGENTS.md](AGENTS.md)
+- Repo page on avd-ops: [avd-ops.dev/docs/repos/avd-m365](https://avd-ops.dev/docs/repos/avd-m365.html)
 
 ## Contributing
 
